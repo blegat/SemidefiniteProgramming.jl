@@ -5,8 +5,9 @@
 
 # This file is adapted from lpqp_to_conic.jl file from MathProgBase
 
-type SDPtoConicBridge <: AbstractConicModel
+type SDPtoConicBridge <: MathProgBase.AbstractConicModel
     sdpmodel::AbstractSDPModel
+    varmap
     c
     A
     b
@@ -14,12 +15,14 @@ type SDPtoConicBridge <: AbstractConicModel
     var_cones
 end
 
-SDPtoConicBridge(m::AbstractSDPModel) = SDPtoConicBridge(m, nothing, nothing, nothing, nothing, nothing)
+# FIXME implements supportedcones
+
+SDPtoConicBridge(m::AbstractSDPModel) = SDPtoConicBridge(m, nothing, nothing, nothing, nothing, nothing, nothing)
 
 export SDPtoConicBridge
 
-numvar(m::SDPtoConicBridge) = size(m.A,2)
-numconstr(m::SDPtoConicBridge) = size(m.A,1)
+MathProgBase.numvar(m::SDPtoConicBridge) = size(m.A,2)
+MathProgBase.numconstr(m::SDPtoConicBridge) = size(m.A,1)
 
 function getmatdim(k)
     # n*(n+1)/2 = k
@@ -29,16 +32,17 @@ function getmatdim(k)
     if n * (n+1) != 2*k
         error("sdp dim not consistent")
     end
-    n
+    convert(Int, n)
 end
 
 # To transform Conic problems into SDP problems
-function loadproblem!(m::SDPtoConicBridge, c, A, b, constr_cones, var_cones)
-    m.c = c
-    m.A = A
-    m.b = b
-    m.constr_cones = constr_cones
-    m.var_cones = var_cones
+function MathProgBase.loadproblem!(model::SDPtoConicBridge, c, A, b, constr_cones, var_cones)
+    m, n = size(A)
+    model.c = c
+    model.A = A
+    model.b = b
+    model.constr_cones = constr_cones
+    model.var_cones = var_cones
 
     # Conic form        LP form
     # min  c'x          min      c'x
@@ -52,12 +56,18 @@ function loadproblem!(m::SDPtoConicBridge, c, A, b, constr_cones, var_cones)
     end
 
     blk = 0
-    varmap = Vector{Tuple{Int,Int,Int,Float64}}[]
+    # For a variable at column index `col' in the conic model,
+    # varmap[col] gives an array such that each coefficient A[.,col] should be replaced by the sum,
+    # over each element (blk, i, j, coef) of the array of
+    # X[blk][i,j] * (A[.,col] * coef)
+    # Where X[blk] is the blk'th block of X
+    model.varmap = varmap = Vector{Vector{Tuple{Int,Int,Int,Float64}}}(n)
     for (cone,idxs) in var_cones
         # If a cone is anything other than [:Free,:Zero,:NonNeg,:NonPos,:SOC,:SOCRotated,:SDP], give up.
         if cone == :Free
             for i in idxs
                 blk += 2
+                # x free transformed into x = y - z with y, z >= 0
                 varmap[i] = [(blk-1,1,1,1.), (blk,1,1,-1.)]
             end
         elseif cone == :Zero
@@ -79,22 +89,28 @@ function loadproblem!(m::SDPtoConicBridge, c, A, b, constr_cones, var_cones)
         elseif cone == :SOCRotated
             error("not supported yet")
         elseif cone == :SDP
-            n = getmatdim(length(idxs))
+            d = getmatdim(length(idxs))
             k = 0
-            for i in 1:n
-                for j in i:n
+            blk += 1
+            for i in 1:d
+                for j in i:d
                     k += 1
-                    blk += 1
-                    varmap[idxs[k]] = [(blk,i,j,1/sqrt(2))]
+                    # In the MPB conic model, those are scaled by sqrt(2)
+                    coef = i == j ? 1. : 1/sqrt(2)
+                    varmap[idxs[k]] = [(blk,i,j,coef)]
                 end
             end
         end
     end
-    sdp = SparseSDP(maximize=false)
     constr = 0
-    constrmap = Vector{Int}(length(b))
-    slackmap = Vector{Int}(length(b))
-    for cone,idxs in constr_cones
+    # For the constraint at row index `row' in the conic model,
+    # constrmap[row] gives the index of the constraint in the SDP model,
+    # a value of 0 meaning that it does not correspond to any constraint
+    constrmap = Vector{Int}(m)
+    # slackmap[row] gives (blk,i,j,coef) indicating that a slack variable has been created at X[blk][i,j] with coefficient coef
+    # blk=0 corresponds to no slack
+    slackmap = Vector{Tuple{Int,Int,Int,Float64}}(m)
+    for (cone,idxs) in constr_cones
         if cone == :Free
             constrmap[idxs] = 0
             slackmap[idxs] = 0
@@ -120,48 +136,80 @@ function loadproblem!(m::SDPtoConicBridge, c, A, b, constr_cones, var_cones)
                     slackmap[idx] = (blk,1,1,1.)
                 end
             elseif cone == :SDP
-                n = getmatdim(length(idxs))
+                d = getmatdim(length(idxs))
                 k = 0
-                for i in 1:n
-                    for j in i:n
+                blk += 1
+                for i in 1:d
+                    for j in i:d
                         k += 1
-                        blk += 1
                         slackmap[idxs[k]] = (blk,i,j,-1.)
                     end
                 end
             end
         end
     end
-    for c in 1:length(b)
-        if constrmap[c] != 0
-            setrhs!(sdp, constr, b[c])
+
+    # Writing the sparse block diagonal matrices
+    sdp = SparseSDP(maximize=false)
+    for row in 1:m
+        if constrmap[row] != 0
+            setrhs!(sdp, constrmap[row], b[row])
         end
-        blk, i, j, coef = slackmap[c]
+        blk, i, j, coef = slackmap[row]
         if blk != 0
-            setcon!(sdp, blk, i, j, coef)
+            setcon!(sdp, constrmap[row], blk, i, j, coef)
         end
     end
     rows = rowvals(A)
     vals = nonzeros(A)
-    m, n = size(A)
-    for col = 1:n
+    for col in 1:n
         for k in nzrange(A, col)
-            c = rows[k]
-            if constrmap[c] != 0 # Free constraint
+            row = rows[k]
+            if constrmap[row] != 0 # Free constraint
                 val = vals[k]
-                blk, i, j, coef = varmap[col]
-                setcon!(sdp, constrmap[c], i, j, val*coef)
+                for (blk, i, j, coef) in varmap[col]
+                    setcon!(sdp, constrmap[row], blk, i, j, val*coef)
+                end
             end
         end
     end
+    for col in 1:n
+        if c[col] != 0
+            for (blk, i, j, coef) in varmap[col]
+                setobj!(sdp, blk, i, j, coef*c[col])
+            end
+        end
+    end
+
+    loadproblem!(model.sdpmodel, sdp)
 end
 
-for f in [:optimize!, :status, :getsolution, :getobjval, :getvartype]
-    @eval $f(model::SDPtoConicBridge) = $f(model.sdpmodel)
+for f in [:optimize!, :status, :getobjval, :getvartype]
+    @eval MathProgBase.$f(model::SDPtoConicBridge) = MathProgBase.$f(model.sdpmodel)
 end
 
-setvartype!(model::SDPtoConicBridge, vtype) = setvartype!(model.sdpmodel, vtype)
+function MathProgBase.getdual(model::SDPtoConicBridge)
+    error("Not implemented yet")
+end
 
-for f in methods_by_tag[:rewrap]
-    @eval $f(model::SDPtoConicBridge) = $f(model.sdpmodel)
+function MathProgBase.getsolution(model::SDPtoConicBridge)
+    X = MathProgBase.getsolution(model.sdpmodel)
+    n = size(model.A, 2)
+    x = zeros(Float64, n)
+    for col in 1:n
+        for (blk, i, j, coef) in model.varmap[col]
+            x[col] += X[blk][i,j] / coef
+        end
+    end
+    x
+end
+
+function setvartype!(model::SDPtoConicBridge, vtype)
+    if any(t->t != :Cont, vtype)
+        error("Invalid variable type")
+    end
+end
+
+for f in MathProgBase.SolverInterface.methods_by_tag[:rewrap]
+    @eval MathProgBase.$f(model::SDPtoConicBridge) = MathProgBase.$f(model.sdpmodel)
 end

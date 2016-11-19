@@ -1,5 +1,8 @@
 module SemidefiniteProgramming
 
+using MathProgBase
+importall MathProgBase.SolverInterface
+
 import 
     Base.print, 
     Base.show,
@@ -51,5 +54,6 @@ include("normalization.jl")
 include("sdpasparse.jl")
 include("solvers.jl")
 include("sdpsolution.jl")
+include("sdp_to_conic.jl")
 
 end

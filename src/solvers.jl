@@ -1,7 +1,7 @@
-abstract AbstractSDPModel <: AbstractMathProgModel
+abstract AbstractSDPModel <: MathProgBase.AbstractMathProgModel
 export AbstractSDPModel
 
-abstract SDPSolver <: AbstractMathProgSolver
+abstract SDPSolver <: MathProgBase.AbstractMathProgSolver
 
 verbose(solver::SDPSolver) = solver.verbose
 
@@ -44,15 +44,46 @@ SDPAGMP(; speed::Integer=0,
           verbose::Bool=false) = SDPAGMP(speed, executable, verbose)
 
 
-immutable CSDP <: SDPSolver
+immutable CSDPSolver <: SDPSolver
     executable::String
     verbose::Bool
 end
 
-CSDP(; executable="csdp", verbose=false) = CSDP(executable, verbose)
+CSDPSolver(; executable="csdp", verbose=false) = CSDPSolver(executable, verbose)
 
-executable(solver::CSDP) = solver.executable
+executable(solver::CSDPSolver) = solver.executable
 
+type CSDPSDPModel <: AbstractSDPModel
+    solver::CSDPSolver
+    sdp
+    sol
+    function CSDPSDPModel(solver::CSDPSolver)
+        new(solver, nothing, nothing)
+    end
+end
+
+function loadproblem!(m::CSDPSDPModel, sdp::SparseSDP)
+    m.sdp = sdp
+end
+
+SDPModel(solver::CSDPSolver) = CSDPSDPModel(solver)
+
+MathProgBase.ConicModel(s::CSDPSolver) = SDPtoConicBridge(SDPModel(s))
+
+function MathProgBase.optimize!(m::CSDPSDPModel)
+    m.sol = solve(m.sdp, m.solver)
+end
+MathProgBase.status(m::CSDPSDPModel) = :Optimal # FIXME
+MathProgBase.getsolution(m::CSDPSDPModel) = primalmatrix(m.sol)
+MathProgBase.getobjval(m::CSDPSDPModel) = obj(m.sol)
+MathProgBase.getvartype(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getobjbound(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getobjgap(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getrawsolver(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getsolvetime(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getsimplexiter(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getbarrieriter(m::CSDPSDPModel) = error("Not implemented yet")
+MathProgBase.getnodecount(m::CSDPSDPModel) = error("Not implemented yet")
 
 
 function solve{T<:Real}(sdp::SparseSDP{T}, solver::SDPAGEN; io::IO=STDOUT, outputfname="output.temp")
@@ -82,7 +113,7 @@ function solve{T<:Real}(sdp::SparseSDP{T}, solver::SDPAGEN; io::IO=STDOUT, outpu
     SparseSDPSolution(primalobjective, dualobjective) 
 end
 
-function solve(sdp::SparseSDP, solver::CSDP; io::IO=STDOUT, outputfname=nothing)
+function solve(sdp::SparseSDP, solver::CSDPSolver; io::IO=STDOUT, outputfname=nothing)
     sdp, cm, bm, ems = normalize(sdp)
 
     datafname, dataio = mktemp()
@@ -119,8 +150,8 @@ function solve(sdp::SparseSDP, solver::CSDP; io::IO=STDOUT, outputfname=nothing)
     readcsdpoutput!(outputio, sol, cm, bm, ems)
     close(outputio)
     if removeoutputfname 
-        rm(outputfname)
+        #rm(outputfname)
     end
-    rm(datafname)
+    #rm(datafname)
     sol   
 end
